@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/ping.ts": {
+      "maxDuration": 15
+    }
+  }
+}
