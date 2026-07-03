@@ -10,6 +10,8 @@ interface PingResult {
   host: string;
   port: number;
   ping: number; // -1 = timeout/dead, >=0 = ms
+  country: string;      // ဥပမာ - "Singapore" (မတွေ့ရင် "Unknown")
+  countryCode: string;  // ဥပမာ - "SG" (flag emoji ဆောက်ဖို့ frontend မှာ သုံးမယ်)
 }
 
 const TIMEOUT_MS = 4000;
@@ -17,10 +19,51 @@ const CONCURRENCY = 10;
 
 // သင့် frontend domain(s) ကိုပဲ ခွင့်ပြုမယ် — security အတွက်
 const ALLOWED_ORIGINS = [
-  'https://kpchannel.cc.cd', // <-- သင့် Cloudflare Pages domain အစစ်ကို ဒီနေရာမှာ ပြောင်းထည့်ပါ
-  'http://localhost:3000', // local dev အတွက်
+  'https://kpchannel.cc.cd',
+  'http://localhost:3000',
 ];
 
+// ===== Geo-IP lookup (auto-detect country) =====
+// ip-api.com — free tier, key မလို, 45 req/min အထိ ခွင့်ပြု (HTTPS မလို, server-side fetch မို့ CORS ပြဿနာ မရှိပါ)
+// Same host ကို ထပ်ခါထပ်ခါ query မလုပ်အောင် in-memory cache ထားမယ် (Vercel function warm instance ထဲမှာ ရှိနေသရွေ့ တည်မယ်)
+interface GeoCacheEntry {
+  country: string;
+  countryCode: string;
+  fetchedAt: number;
+}
+const geoCache = new Map<string, GeoCacheEntry>();
+const GEO_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 နာရီ — IP location ဟာ ခဏခဏ ပြောင်းတာ မဟုတ်လို့
+
+async function lookupCountry(host: string): Promise<{ country: string; countryCode: string }> {
+  const cached = geoCache.get(host);
+  if (cached && Date.now() - cached.fetchedAt < GEO_CACHE_TTL_MS) {
+    return { country: cached.country, countryCode: cached.countryCode };
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(
+      `http://ip-api.com/json/${host}?fields=status,country,countryCode`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+    const data = (await res.json()) as { status: string; country?: string; countryCode?: string };
+
+    const result =
+      data.status === 'success' && data.country && data.countryCode
+        ? { country: data.country, countryCode: data.countryCode }
+        : { country: 'Unknown', countryCode: '' };
+
+    geoCache.set(host, { ...result, fetchedAt: Date.now() });
+    return result;
+  } catch {
+    // Lookup fail ရင် cache မထားဘဲ "Unknown" ပြန်ပေး — နောက် request မှာ ထပ်ကြိုးစားနိုင်ဖို့
+    return { country: 'Unknown', countryCode: '' };
+  }
+}
+
+// ===== TCP ping =====
 function checkTcp(host: string, port: number): Promise<number> {
   return new Promise((resolve) => {
     const start = Date.now();
@@ -57,7 +100,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Preflight request
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
@@ -76,7 +118,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
-    // safety cap
     const safeTargets = targets.slice(0, 200);
 
     const results: PingResult[] = [];
@@ -85,8 +126,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     for (const chunk of chunks) {
       const chunkResults = await Promise.all(
         chunk.map(async ({ host, port }) => {
-          const ping = await checkTcp(host, port);
-          return { host, port, ping };
+          // Ping နဲ့ country lookup ကို တစ်ပြိုင်နက်တည်း လုပ်မယ် — sequential လုပ်ရင် နှေးမှာမို့
+          const [ping, geo] = await Promise.all([
+            checkTcp(host, port),
+            lookupCountry(host),
+          ]);
+          return { host, port, ping, country: geo.country, countryCode: geo.countryCode };
         })
       );
       results.push(...chunkResults);
