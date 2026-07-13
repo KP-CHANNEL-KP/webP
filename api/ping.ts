@@ -19,7 +19,7 @@ const CONCURRENCY = 10;
 
 // သင့် frontend domain(s) ကိုပဲ ခွင့်ပြုမယ် — security အတွက်
 const ALLOWED_ORIGINS = [
-  'https://kpchannel.cc.cd',
+  'https://kpvpn.shop',
   'http://localhost:3000',
 ];
 
